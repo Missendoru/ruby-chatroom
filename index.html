@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>index.html</title>
+    <style>
+        #terminal {
+            white-space: pre-wrap; 
+            border: 1px solid black; 
+            height: 400px; 
+            overflow-y: scroll;
+			font-family: 'Courier New', Courier, monospace;
+        }
+    </style>
+</head>
+<body>
+<h1> hi lol </h1>
+<hr />
+<div id="terminal"></div>
+<hr />
+<input type="text" id="cmd-box" placeholder="type a message or /command here" autofocus style="width: 100%;" />
+<script>
+    const terminal = document.getElementById('terminal');
+    const cmdBox = document.getElementById('cmd-box');
+    
+    const socket = new WebSocket('ws://' + window.location.hostname + ':3001');
+
+    function writeToTerminal(node) {
+        terminal.appendChild(node);
+        terminal.scrollTop = terminal.scrollHeight;
+    }
+
+    function writeText(str) {
+        const div = document.createElement('div');
+        div.textContent = str;
+        writeToTerminal(div);
+    }
+
+    socket.onopen = () => {
+        writeText(">> connected to server");
+        
+        const savedName = localStorage.getItem('arcade_username');
+
+        if (savedName) {
+            socket.send(JSON.stringify({
+                type: 'sync_profile',
+                username: savedName
+            }));
+            writeText(`>> welcome back ${savedName}`);
+        }
+    };
+
+    socket.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+
+        if (data.type === 'clear') {
+            terminal.innerHTML = '';
+            writeText(">> Terminal screen cleared manually.");
+            return;
+        }
+
+        if (data.type === 'save_profile') {
+            localStorage.setItem('arcade_username', data.username);
+            return;
+        }
+
+        const container = document.createElement('div');
+
+        if (data.timestamp) {
+            const spanTime = document.createElement('span');
+            spanTime.textContent = `[${new Date(data.timestamp).toLocaleTimeString()}] `;
+            container.appendChild(spanTime);
+        }
+
+        if (data.type === 'chat') {
+            const userSpan = document.createElement('span');
+            userSpan.textContent = `<${data.from}>: `;
+            container.appendChild(userSpan);
+
+            const msgText = document.createElement('span');
+            msgText.textContent = data.message;
+            container.appendChild(msgText);
+            writeToTerminal(container);
+        } else {
+            writeText(data.message);
+        }
+    };
+
+    cmdBox.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+            const input = cmdBox.value.trim();
+            if (!input) return;
+
+            if (input.startsWith('/')) {
+                socket.send(JSON.stringify({
+                    type: 'command',
+                    command: input.slice(1)
+                }));
+            } else {
+                socket.send(JSON.stringify({
+                    type: 'chat',
+                    message: input
+                }));
+            }
+            cmdBox.value = '';
+        }
+    });
+</script>
+</body>
+</html>
