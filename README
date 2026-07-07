@@ -20,10 +20,21 @@ commands available (also shown when doing /help)
 /name [handle] - change profile ID
 /players - list users
 /play [handle] [ttt|rps|battle|sea] - request match
+/spectate [handle] - spectate active match
 /accept - accept pending request
 /decline - decline pending request
 /clear - clear client history terminal
 /quit - drop current game
+
+to spectate, use /spectate followed by the handle ID of a player
+currently playing a game with someone else. you can see who is
+playing a game or not by using the /players command.
+you will get a feed of whatever is being sent through the screen
+of the player you chose to spectate, as well as both player's messages.
+spectators can see each other's messages as long as they're spectating 
+the same match, but players playing that match cannot see spectator
+messages. you can quit spectating by doing /quit, the same command
+for quitting a game.
 
 there is infact some trace of a pfp feature I was testing out but I
 didn't end up implementing due to the server freezing.

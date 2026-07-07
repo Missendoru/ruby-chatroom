@@ -69,7 +69,7 @@ end
 def bcast(data, ex = nil)
   raw = data.to_json
   $cc.each_key do |s|
-    next if $cc[s][:g_id]
+    next if $cc[s][:g_id] || $cc[s][:spec_g_id]
     if data[:type] == 'chat'
       w_fr(s, raw)
     else
@@ -83,6 +83,7 @@ def tx_g(g_id, data)
   return unless g
   tx_cl(g[:p1], data) if g[:p1]
   tx_cl(g[:p2], data) if g[:p2]
+  g[:specs].each { |spec_sock| tx_cl(spec_sock, data) }
 end
 
 def kill_g(g_id)
@@ -90,12 +91,30 @@ def kill_g(g_id)
   if g
     $cc[g[:p1]][:g_id] = nil if g[:p1] && $cc[g[:p1]]
     $cc[g[:p2]][:g_id] = nil if g[:p2] && $cc[g[:p2]]
+    g[:specs].each do |spec_sock|
+      if $cc[spec_sock]
+        $cc[spec_sock][:spec_g_id] = nil
+        tx_cl(spec_sock, { type: 'system', message: 'The match has concluded. You are no longer spectating.' })
+      end
+    end
     $gg.delete(g_id)
   end
 end
 
+def stop_spec(s)
+  return unless $cc[s] && $cc[s][:spec_g_id]
+  g_id = $cc[s][:spec_g_id]
+  g = $gg[g_id]
+  if g
+    g[:specs].delete(s)
+    tx_g(g_id, { type: 'system', message: "#{$cc[s][:name]} stopped spectating." })
+  end
+  $cc[s][:spec_g_id] = nil
+end
+
 def purge(s, man = false)
   return unless $cc[s]
+  stop_spec(s)
   g_id = $cc[s][:g_id]
   return unless g_id
   tx_g(g_id, { type: 'system', message: "#{$cc[s][:name]} left the match." }) if man
@@ -127,13 +146,24 @@ def mk_sea
   grid
 end
 
-def view_sea(g1, g2)
-  out = "         [YOUR FLEET]                       [TARGET RADIAL]\n"
-  out << "   1 2 3 4 5 6 7 8 9 1011              1 2 3 4 5 6 7 8 9 1011\n"
+def view_sea(g1, g2, lbl1 = "[YOUR FLEET]", lbl2 = "[TARGET RADIAL]", show_all_ships = false)
+  h1 = lbl1.center(25)
+  h2 = lbl2.center(25)
+  out = "  #{h1}              #{h2}\n"
+  out << "   1 2 3 4 5 6 7 8 9 1011               1 2 3 4 5 6 7 8 9 1011\n"
   0.step(10) do |r|
     lbl = (r + 1).to_s.rjust(2)
     l_side = g1[r].map { |c| c == ' ' ? '.' : c }.join(" ")
-    r_side = g2[r].map { |c| c == 'S' ? '.' : (c == ' ' ? '.' : c) }.join(" ")
+    r_side = g2[r].map do |c| 
+      if c == 'S'
+        show_all_ships ? 'S' : '.'
+      elsif c == ' '
+        '.'
+      else
+        c
+      end
+    end.join(" ")
+    
     left_block = sprintf("%-31s", "#{lbl} #{l_side}")
     out << "#{left_block} |   #{lbl} #{r_side}\n"
   end
@@ -142,15 +172,16 @@ end
 
 def setup_g(t, p1, p2)
   n1, n2 = $cc[p1][:name], $cc[p2][:name]
+  base = { p1: p1, p2: p2, specs: [] }
   case t
   when 'ttt'
-    { type: 'ttt', p1: p1, p2: p2, turn: p1, board: Array.new(9, ' '), syms: { n1 => 'X', n2 => 'O' } }
+    base.merge({ type: 'ttt', turn: p1, board: Array.new(9, ' '), syms: { n1 => 'X', n2 => 'O' } })
   when 'rps'
-    { type: 'rps', p1: p1, p2: p2, moves: {} }
+    base.merge({ type: 'rps', moves: {} })
   when 'battle'
-    { type: 'battle', p1: p1, p2: p2, turn: p1, st: { n1 => { hp: 100, max: 100, it: 2, df: false }, n2 => { hp: 100, max: 100, it: 2, df: false } } }
+    base.merge({ type: 'battle', turn: p1, st: { n1 => { hp: 100, max: 100, it: 2, df: false }, n2 => { hp: 100, max: 100, it: 2, df: false } } })
   when 'sea'
-    { type: 'sea', p1: p1, p2: p2, turn: p1, grids: { p1 => mk_sea, p2 => mk_sea }, left: { p1 => 17, p2 => 17 }, rdy: { p1 => false, p2 => false } }
+    base.merge({ type: 'sea', turn: p1, grids: { p1 => mk_sea, p2 => mk_sea }, left: { p1 => 17, p2 => 17 }, rdy: { p1 => false, p2 => false } })
   end
 end
 
@@ -173,16 +204,19 @@ def draw_g(g_id)
   elsif g[:type] == 'sea'
     p1, p2 = g[:p1], g[:p2]
     rdy_all = g[:rdy][p1] && g[:rdy][p2]
+
     [p1, p2].each do |ps|
       os = (ps == p1) ? p2 : p1
-      v = view_sea(g[:grids][ps], g[:grids][os])
-      if rdy_all
-        m = "\nAll set! Battle starting.\nopponent ships remaining: #{g[:left][os]}/17\nturn: #{tn}. command: /fire [1-11] [1-11]"
-      else
-        m = "\n[Pre-Game Setup]\nyour Status: #{g[:rdy][ps] ? 'READY' : 'NOT READY'} | opponent Status: #{g[:rdy][os] ? 'READY' : 'NOT READY'}\nactions: \ntype `/reroll` to shuffle your ships, or `/ready` once you're ready."
-      end
+      v = view_sea(g[:grids][ps], g[:grids][os], "[YOUR FLEET]", "[TARGET RADIAL]")
+      m = rdy_all ? "\nAll set! Battle starting.\nopponent ships remaining: #{g[:left][os]}/17\nturn: #{tn}. command: /fire [1-11] [1-11]" : "\n[Pre-Game Setup]\nyour Status: #{g[:rdy][ps] ? 'READY' : 'NOT READY'} | opponent Status: #{g[:rdy][os] ? 'READY' : 'NOT READY'}\nactions: \ntype `/reroll` to shuffle your ships, or `/ready` once you're ready."
       tx_cl(ps, { type: 'game', message: v + m })
     end
+
+    g[:specs].each do |spec_sock|
+	  v = view_sea(g[:grids][p1], g[:grids][p2], "[#{n1}]", "[#{n2}]", true) 
+	  m = "\n[SPECTATOR VIEW]\n#{n1} vs #{n2}\nTurn: #{tn}"
+	  tx_cl(spec_sock, { type: 'game', message: v + m })
+	end
   end
 end
 
@@ -197,7 +231,7 @@ def p_mv(s, cmd, args)
   me = $cc[s][:name]
   os = (g[:p1] == s) ? g[:p2] : g[:p1]
   opp = $cc[os][:name]
-
+  
   if g[:type] == 'ttt'
     return tx_cl(s, { type: 'system', message: 'use /move [1-9]' }) if cmd != 'move'
     return tx_cl(s, { type: 'system', message: "it's not your turn" }) if g[:turn] != s
@@ -215,7 +249,6 @@ def p_mv(s, cmd, args)
     end
     g[:turn] = os
     draw_g(g_id)
-
   elsif g[:type] == 'rps'
     return tx_cl(s, { type: 'system', message: 'choose: /rock, /paper, or /scissors' }) unless ['rock', 'paper', 'scissors'].include?(cmd)
     return tx_cl(s, { type: 'system', message: 'you already locked in a choice' }) if g[:moves][me]
@@ -235,7 +268,6 @@ def p_mv(s, cmd, args)
         kill_g(g_id)
       end
     end
-
   elsif g[:type] == 'battle'
     return tx_cl(s, { type: 'system', message: 'actions: /attack, /defend, /item' }) unless ['attack', 'defend', 'item'].include?(cmd)
     return tx_cl(s, { type: 'system', message: "it's not your turn !!" }) if g[:turn] != s
@@ -266,7 +298,6 @@ def p_mv(s, cmd, args)
     end
     g[:turn] = os
     draw_g(g_id)
-
   elsif g[:type] == 'sea'
     all_ok = g[:rdy][g[:p1]] && g[:rdy][g[:p2]]
     if cmd == 'reroll'
@@ -305,54 +336,109 @@ end
 def h_cmd(s, raw)
   args = raw.strip.split(' ')
   cmd = args.shift.downcase
-  return tx_cl(s, { type: 'system', message: "--- prompts ---\n/help - show options\n/name [handle] - change profile ID\n/players - list users\n/play [handle] [ttt|rps|battle|sea] - request match\n/accept - accept pending request\n/decline - decline pending request\n/clear - clear client history terminal\n/quit - drop current game" }) if cmd == 'help'
+  return tx_cl(s, { type: 'system', message: "--- prompts ---\n/help - show options\n/name [handle] - change profile ID\n/players - list users\n/play [handle] [ttt|rps|battle|sea] - request match\n/spectate [handle] - spectate active match\n/accept - accept pending request\n/decline - decline pending request\n/clear - clear client history terminal\n/quit - drop current game or stop spectating" }) if cmd == 'help'
   return tx_cl(s, { type: 'clear' }) if cmd == 'clear'
+  
   if cmd == 'name' && args[0]
     old = $cc[s][:name]
     $cc[s][:name] = args[0][0..11]
     tx_cl(s, { type: 'save_profile', username: $cc[s][:name] })
-    return bcast({ type: 'system', message: "#{old} ID changed to #{$cc[s][:name]}." })
+    return bcast({ type: 'system', message: "#{old} changed their ID to #{$cc[s][:name]}." })
   end
+  
   if cmd == 'players'
     lby, act = [], []
-    $cc.values.each { |c| c[:g_id] ? act << c[:name] : lby << c[:name] }
-    return tx_cl(s, { type: 'system', message: "--- Connected Users ---\nnot playing: #{lby.empty? ? 'None' : lby.join(', ')}\nplaying: #{act.empty? ? 'None' : act.join(', ')}" })
+    $cc.values.each do |c| 
+      if c[:g_id] && $gg[c[:g_id]]
+        act << "#{c[:name]} (#{$gg[c[:g_id]][:type].upcase})"
+      elsif c[:spec_g_id] && $gg[c[:spec_g_id]]
+        lby << "#{c[:name]} (spectating)"
+      else
+        lby << c[:name] 
+      end
+    end
+    return tx_cl(s, { type: 'system', message: "--- connected users ---\nnot playing: #{lby.empty? ? 'none' : lby.join(', ')}\nplaying: #{act.empty? ? 'none' : act.join(', ')}" })
   end
+  
+  if cmd == 'spectate'
+    t_name = args[0]
+    return tx_cl(s, { type: 'system', message: 'usage: /spectate [user]' }) unless t_name
+    return tx_cl(s, { type: 'system', message: 'you cannot spectate while you are playing an active match.' }) if $cc[s][:g_id]
+    
+    t_sock = $cc.find { |_, v| v[:name] == t_name }&.first
+    return tx_cl(s, { type: 'system', message: 'User target lookup fail.' }) if !t_sock
+    
+    g_id = $cc[t_sock][:g_id]
+    return tx_cl(s, { type: 'system', message: "#{t_name} is not in an active match." }) if !g_id || !$gg[g_id]
+    
+    stop_spec(s)
+    
+    $cc[s][:spec_g_id] = g_id
+    $gg[g_id][:specs] << s
+    
+    tx_cl(s, { type: 'system', message: "you are now spectating the match #{t_name} is playing." })
+    tx_g(g_id, { type: 'system', message: "#{$cc[s][:name]} started spectating this match." })
+    
+    return draw_g(g_id)
+  end
+
   if cmd == 'play'
     t_name = args[0]
     gt = args[1] ? args[1].downcase : nil
     return tx_cl(s, { type: 'system', message: 'usage: /play [user] [ttt | rps | battle | sea]' }) unless ['ttt','rps','battle','sea'].include?(gt)
     return tx_cl(s, { type: 'system', message: 'clear existing game states first with /quit' }) if $cc[s][:g_id]
+    
     t_sock = $cc.find { |_, v| v[:name] == t_name }&.first
     return tx_cl(s, { type: 'system', message: 'user target lookup failure.' }) if !t_sock || t_sock == s
     return tx_cl(s, { type: 'system', message: "#{t_name} is currently in a match" }) if $cc[t_sock][:g_id]
+    
     $pp[t_sock] = { challenger: s, type: gt }
     tx_cl(s, { type: 'system', message: "match request sent to #{t_name}, waiting for handshake..." })
-    return tx_cl(t_sock, { type: 'system', message: " #{$cc[s][:name]} wants to play #{gt.upcase} with you. \n type `/accept` or `/decline`" })
+    return tx_cl(t_sock, { type: 'system', message: " #{$cc[s][:name]} wants to play #{gt.upcase} with you. \ntype `/accept` or `/decline`" })
   end
+  
   if cmd == 'accept'
     ch = $pp.delete(s)
     return tx_cl(s, { type: 'system', message: 'no pending match requests found' }) unless ch
     cs = ch[:challenger]
     return tx_cl(s, { type: 'system', message: 'player has disconnected or joined another room' }) if !$cc[cs] || $cc[cs][:g_id]
+    
+    stop_spec(s) if $cc[s][:spec_g_id]
+    stop_spec(cs) if $cc[cs][:spec_g_id]
+    
     g_id = "game_#{SecureRandom.hex(4)}"
     $cc[s][:g_id] = $cc[cs][:g_id] = g_id
     $gg[g_id] = setup_g(ch[:type], cs, s)
     tx_g(g_id, { type: 'game', message: "Session bound: #{$cc[cs][:name]} vs #{$cc[s][:name]}!" })
     return draw_g(g_id)
   end
+  
   if cmd == 'decline'
     ch = $pp.delete(s)
-    return tx_cl(s, { type: 'system', message: 'No pending match requests found.' }) unless ch
+    return tx_cl(s, { type: 'system', message: 'no pending match requests found' }) unless ch
     cs = ch[:challenger]
-    tx_cl(cs, { type: 'system', message: "#{$cc[s][:name]} declined your match request." }) if cs && $cc[cs]
+    tx_cl(cs, { type: 'system', message: "#{$cc[s][:name]} declined your match request" }) if cs && $cc[cs]
     return tx_cl(s, { type: 'system', message: 'request successfully declined' })
   end
+  
   if cmd == 'quit'
-    return tx_cl(s, { type: 'system', message: 'no current session running.' }) unless $cc[s][:g_id]
-    return purge(s, true)
+    if $cc[s][:spec_g_id]
+      stop_spec(s)
+      return tx_cl(s, { type: 'system', message: 'you have stopped spectating' })
+    elsif $cc[s][:g_id]
+      return purge(s, true)
+    else
+      return tx_cl(s, { type: 'system', message: 'no current active or spectated sessions' })
+    end
   end
-  $cc[s][:g_id] ? p_mv(s, cmd, args) : tx_cl(s, { type: 'system', message: 'idk what that is bro' })
+  
+  if $cc[s][:g_id]
+    p_mv(s, cmd, args)
+  elsif $cc[s][:spec_g_id]
+    tx_cl(s, { type: 'system', message: 'game commands are disabled for spectators' })
+  else
+    tx_cl(s, { type: 'system', message: 'idk what that is bro' })
+  end
 end
 
 Thread.new do
@@ -383,9 +469,11 @@ loop do
   Thread.start(ws.accept) do |s|
     begin
       if hs(s)
-        $cc[s] = { name: "Guest_#{rand(1000..9999)}", g_id: nil, pfp: nil }
+        $cc[s] = { name: "Guest_#{rand(1000..9999)}", g_id: nil, spec_g_id: nil, pfp: nil }
         tx_cl(s, { type: 'system', message: "handshake verified. use /help for options" })
         bcast({ type: 'system', message: "#{$cc[s][:name]} connected." }, s)
+        h_cmd(s, 'players')
+        
         loop do
           pld = r_fr(s)
           break if pld.nil? || pld == :close
@@ -394,12 +482,26 @@ loop do
             if psd['type'] == 'sync_profile'
               $cc[s][:name] = psd['username'][0..11] if psd['username']
               $cc[s][:pfp] = psd['pfp'] if psd['pfp']
+              h_cmd(s, 'players')
               next
             end
+            
             if psd['type'] == 'chat'
               g_id = $cc[s][:g_id]
+              spec_g_id = $cc[s][:spec_g_id]
               pay = { type: 'chat', from: $cc[s][:name], pfp: $cc[s][:pfp], message: psd['message'], timestamp: Time.now.iso8601 }
-              g_id ? tx_g(g_id, pay) : bcast(pay, s)
+              
+              if g_id
+                tx_g(g_id, pay)
+              elsif spec_g_id
+                g = $gg[spec_g_id]
+                if g
+                  tx_cl(s, pay)
+                  g[:specs].each { |spec_sock| tx_cl(spec_sock, pay) if spec_sock != s }
+                end
+              else
+                bcast(pay, s)
+              end
             elsif psd['type'] == 'command'
               h_cmd(s, psd['command'])
             end
