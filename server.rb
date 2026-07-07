@@ -207,7 +207,7 @@ def draw_g(g_id)
 
     [p1, p2].each do |ps|
       os = (ps == p1) ? p2 : p1
-      v = view_sea(g[:grids][ps], g[:grids][os], "[YOUR FLEET]", "[TARGET RADIAL]")
+      v = view_sea(g[:grids][ps], g[:grids][os], "[YOUR FLEET]", "[TARGET RADIAL]") ## stupid shit that won't align
       m = rdy_all ? "\nAll set! Battle starting.\nopponent ships remaining: #{g[:left][os]}/17\nturn: #{tn}. command: /fire [1-11] [1-11]" : "\n[Pre-Game Setup]\nyour Status: #{g[:rdy][ps] ? 'READY' : 'NOT READY'} | opponent Status: #{g[:rdy][os] ? 'READY' : 'NOT READY'}\nactions: \ntype `/reroll` to shuffle your ships, or `/ready` once you're ready."
       tx_cl(ps, { type: 'game', message: v + m })
     end
